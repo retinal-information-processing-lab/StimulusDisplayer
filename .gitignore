@@ -1,0 +1,8 @@
+
+*.gif
+*.vec
+*.bin
+/vec/
+/bin/
+/StimList/
+/GIFs/
