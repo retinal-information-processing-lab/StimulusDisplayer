@@ -6,3 +6,7 @@
 /bin/
 /StimList/
 /GIFs/
+
+.ipynb_checkpoints/
+
+__pycache__/
