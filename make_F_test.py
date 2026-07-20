@@ -13,6 +13,7 @@ import os
 import numpy as np
 
 from binfile import BinFile
+from rig_settings import get_rig_settings
 
 # ---- F canvas ----------------------------------------------------------------
 SIZE = 432          # square window, in pixels (matches the 432 x 432 stimuli)
@@ -40,7 +41,15 @@ def main() -> None:
     vec_path = os.path.join(here, "VEC", "F_TEST_432x432.vec")
 
     # ---- bin: frame 0 = black, frame 1 = F (F is the second frame by convention) ----
-    binf = BinFile(bin_path, SIZE, SIZE, RIG_ID, nb_images=2, mode="w")
+    binf = BinFile(
+        bin_path,
+        SIZE,
+        SIZE,
+        RIG_ID,
+        nb_images=2,
+        mode="w",
+        rig_settings=get_rig_settings(RIG_ID),
+    )
     binf.append(np.zeros((SIZE, SIZE), dtype=float))
     binf.append(make_F())
     binf.close()

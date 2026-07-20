@@ -1,72 +1,141 @@
+"""Read/write the stimulus ".bin" files (the raw frames shown on the DMD).
+
+Everything rig-dependent (DMD geometry, display polarity, optical correction) is defined
+ONCE in params.py (``params.rig_params``) and read from there — nothing is hard-coded here.
+Rigs that have not been implemented/tested warn and fall back to neutral defaults (see
+``params.get_display_rig_params``).
+
+This module is deliberately kept free of any import-time dependency on ``params``: the
+settings can also be passed explicitly via ``BinFile(..., rig_settings={...})``, and
+``params`` is only imported when they are not. That way the exact same file can be used by
+the standalone StimulusDisplayer tool, which has no experiment configuration to load.
+Keep the two copies identical (tests/test_binfile_sync.py checks it).
+"""
+
+from typing import Optional
+
 import numpy as np
 import os
 
-class BinFile:
 
+def apply_optical_transform(frame: np.ndarray, transform: Optional[str]) -> np.ndarray:
+    """Correct a frame READ from a .bin for the optical path of the rig.
+
+    ``transform`` is the rig's "optical_transform" in params.rig_params.
+    """
+    if transform is None:
+        return frame
+    if transform == "rot90_flipud":
+        return np.flipud(np.rot90(frame))
+    if transform == "fliplr":
+        return np.fliplr(frame)
+    raise ValueError(
+        f"Unknown optical_transform {transform!r} in params.rig_params. "
+        "Known values: 'rot90_flipud', 'fliplr', None."
+    )
+
+
+def undo_optical_transform(frame: np.ndarray, transform: Optional[str]) -> np.ndarray:
+    """Pre-compensate a frame about to be WRITTEN to a .bin.
+
+    This is the inverse of apply_optical_transform, so that reading back a frame you
+    wrote gives you the frame you started from.
+    """
+    if transform is None:
+        return frame
+    if transform == "rot90_flipud":
+        return np.rot90(np.flipud(frame), k=3)
+    if transform == "fliplr":
+        return np.fliplr(frame)
+    raise ValueError(
+        f"Unknown optical_transform {transform!r} in params.rig_params. "
+        "Known values: 'rot90_flipud', 'fliplr', None."
+    )
+
+
+class BinFile:
     @classmethod
     def read_header(cls, path):
-
         header = {}
-        with open(path, mode='rb') as input_file:
+        with open(path, mode="rb") as input_file:
             # Read image xsize.
             image_xsize_bytes = input_file.read(2)
-            header['xsize'] = int.from_bytes(image_xsize_bytes, byteorder='little')
+            header["xsize"] = int.from_bytes(image_xsize_bytes, byteorder="little")
             # Read image ysize.
             image_ysize_bytes = input_file.read(2)
-            header['ysize'] = int.from_bytes(image_ysize_bytes, byteorder='little')
+            header["ysize"] = int.from_bytes(image_ysize_bytes, byteorder="little")
             # Read number of images.
             nb_images_bytes = input_file.read(2)
-            header['nb_images'] = int.from_bytes(nb_images_bytes, byteorder='little')
+            header["nb_images"] = int.from_bytes(nb_images_bytes, byteorder="little")
             # Read number of bits.
             nb_bits_bytes = input_file.read(2)
-            header['nb_bits'] = int.from_bytes(nb_bits_bytes, byteorder='little')
+            header["nb_bits"] = int.from_bytes(nb_bits_bytes, byteorder="little")
 
         return header
 
     @classmethod
     def read_nb_images(cls, path):
-
         header = cls.read_header(path)
 
-        return header['nb_images']
+        return header["nb_images"]
 
-    def __init__(self, path, frame_xsize, frame_ysize, rig_id, nb_images=0, reverse=False, mode='r'):
+    def __init__(
+        self,
+        path,
+        frame_xsize,
+        frame_ysize,
+        rig_id,
+        nb_images=0,
+        reverse=False,
+        mode="r",
+        rig_settings=None,
+    ):
+        """Open a stimulus .bin for reading or writing.
 
+        Args:
+            rig_settings: dict with this rig's display settings, i.e. "max_frame_size"
+                ([x, y] or None for no size check), "invert_polarity" (bool) and
+                "optical_transform" ("rot90_flipud", "fliplr" or None). Leave it None in
+                the analysis pipeline: the settings are then read from params.rig_params
+                for ``rig_id``. Pass it explicitly to use this class without params (e.g.
+                the standalone StimulusDisplayer).
+        """
         self._path = path
         self._reverse = reverse
         self._mode = mode
-
-        assert rig_id == 2 or rig_id == 3, f"unknown rig_id: {rig_id}"
         self._rig_id = rig_id
 
-        if self._rig_id == 2:
-            self._max_dimension_x = 1920
-            self._max_dimension_y = 1080
-        elif self._rig_id == 3:
-            self._max_dimension_x = 1024
-            self._max_dimension_y = 768
+        # Every rig-dependent setting comes from params.py unless given explicitly. Rigs
+        # that are not implemented/tested warn there (work in progress) and fall back to
+        # neutral defaults. params is imported lazily so this module works without it.
+        if rig_settings is None:
+            import params
 
-        if self._mode == 'r':
+            rig_settings = params.get_display_rig_params(rig_id)
+        rig = rig_settings
+        max_frame_size = rig["max_frame_size"]
+        # A rig with no known max frame size (work-in-progress) simply gets no size check.
+        self._max_dimension_x, self._max_dimension_y = max_frame_size or (None, None)
+        self._invert_polarity = rig["invert_polarity"]
+        self._optical_transform = rig["optical_transform"]
+
+        if self._mode == "r":
             header = self.read_header(self._path)
-            self._nb_images = header['nb_images']
-            assert header[
-                       'xsize'] <= self._max_dimension_x, f"image is too big on x axis for RIG {self._rig_id} ({header['xsize']} > {self._max_dimension_x}. "
-            self._frame_xsize = header['xsize']
-            assert header[
-                       'ysize'] <= self._max_dimension_y, f"image is too big on y axis for RIG {self._rig_id} ({header['ysize']} > {self._max_dimension_y}. "
-            self._frame_ysize = header['ysize']
-            self._nb_bits = header['nb_bits']
-            self._file = open(self._path, mode='rb')
+            self._nb_images = header["nb_images"]
+            self._check_frame_size(header["xsize"], header["ysize"])
+            self._frame_xsize = header["xsize"]
+            self._frame_ysize = header["ysize"]
+            self._nb_bits = header["nb_bits"]
+            self._file = open(self._path, mode="rb")
             self._frame_nb = self._nb_images - 1
-        elif self._mode == 'w':
+        elif self._mode == "w":
             self._nb_images = nb_images
-            assert frame_xsize <= self._max_dimension_x, f"image is too big on x axis for RIG {self._rig_id}: {frame_xsize} > {self._max_dimension_x}. "
+            self._check_frame_size(frame_xsize, frame_ysize)
             self._frame_xsize = frame_xsize
-            assert frame_ysize <= self._max_dimension_y, f"image is too big on y axis for RIG {self._rig_id}: {frame_ysize} > {self._max_dimension_y}. "
             self._frame_ysize = frame_ysize
             self._nb_bits = 8
             # self._file = open(self._path, mode='w+b')
-            self._file = open(self._path, mode='wb')
+            self._file = open(self._path, mode="wb")
             self._write_header()
             self._frame_nb = -1
         else:
@@ -74,18 +143,26 @@ class BinFile:
 
         self._counter = 0
 
-    def __len__(self):
+    def _check_frame_size(self, xsize, ysize):
+        """Check a frame fits this rig's DMD. Skipped when the rig's max size is unknown."""
+        if self._max_dimension_x is not None:
+            assert xsize <= self._max_dimension_x, (
+                f"image is too big on x axis for RIG {self._rig_id} ({xsize} > {self._max_dimension_x})."
+            )
+        if self._max_dimension_y is not None:
+            assert ysize <= self._max_dimension_y, (
+                f"image is too big on y axis for RIG {self._rig_id} ({ysize} > {self._max_dimension_y})."
+            )
 
+    def __len__(self):
         return self._nb_images
 
     def __iter__(self):
-
         self._counter = 0  # i.e. reinitialization
 
         return self
 
     def __next__(self):
-
         if self._counter < len(self):
             frame = self.read_frame(self._counter)
             self._counter += 1
@@ -96,12 +173,10 @@ class BinFile:
 
     @property
     def _frame_shape(self):
-
         return self._frame_xsize, self._frame_ysize
 
     @property
     def ysize(self):
-
         return self._frame_ysize
 
     @property
@@ -110,21 +185,17 @@ class BinFile:
 
     @property
     def nb_frames(self):
-
         return self._nb_images
 
     @property
     def nb_bits(self):
-
         return self._nb_bits
 
     def is_readable(self):
-
-        return self._mode == 'r'
+        return self._mode == "r"
 
     def is_writeable(self):
-
-        return self._mode == 'w'
+        return self._mode == "w"
 
     def get_frame_nb(self):
         """Get the number of the latest frame appended."""
@@ -176,20 +247,16 @@ class BinFile:
         shape = (self._frame_xsize, self._frame_ysize)
         frame_data = np.reshape(frame_data, shape)
 
-        # Reverse data 
-        if self._rig_id == 3:
+        # Undo the display polarity of this rig (frames are stored inverted on such rigs)
+        if self._invert_polarity:
             frame_data = 1 - frame_data
 
-        # transform to compensate optical transformation on the setup
-        if self._rig_id == 2:
-            frame_data = np.flipud(np.rot90(frame_data))
-        elif self._rig_id == 3:
-            frame_data = np.fliplr(frame_data)
+        # Compensate the optical transformation of this rig's setup
+        frame_data = apply_optical_transform(frame_data, self._optical_transform)
 
         return frame_data
 
     def _write_header(self):
-
         header_list = [
             self._frame_xsize,
             self._frame_ysize,
@@ -204,29 +271,18 @@ class BinFile:
         return
 
     def append(self, frame):
-
         if isinstance(frame, bytes):
-
             assert len(frame) == self._frame_ysize * self._frame_xsize, len(frame)
 
             self._file.write(frame)
 
         else:
-
-            #             assert frame.dtype == np.uint8, "frame.dtype: {}".format(frame.dtype)
-
             # reverse polarity if necessary (to compensate polarity reversal on display)
-            if self._rig_id == 3:
-                #                 frame = np.iinfo(np.uint8).max - frame
+            if self._invert_polarity:
                 frame = 1 - frame
-            elif self._rig_id == 2:
-                pass
 
             # transform to compensate optical transformation on the setup
-            if self._rig_id == 2:
-                frame = np.rot90(np.flipud(frame), k=3)
-            elif self._rig_id == 3:
-                frame = np.fliplr(frame)
+            frame = undo_optical_transform(frame, self._optical_transform)
 
             # Scale data between 0 and 255
             frame = frame * 255
@@ -240,13 +296,11 @@ class BinFile:
         return
 
     def flush(self):
-
         os.fsync(self._file.fileno())  # force write
 
         return
 
     def close(self):
-
         self.flush()
         self._file.close()
 
