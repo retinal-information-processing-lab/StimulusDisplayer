@@ -163,12 +163,12 @@ class BinFile:
         self._file.seek(byte_offset)
         # Read data from file.
         frame_bytes = self._file.read(frame_byte_size)
-        frame_data = np.fromstring(frame_bytes, dtype=np.uint8)
+        frame_data = np.frombuffer(frame_bytes, dtype=np.uint8)
         if verbose > 1:
             print("max value = ", np.max(frame_data))
 
         # Convert data to float.
-        frame_data = frame_data.astype(np.float)
+        frame_data = frame_data.astype(float)
         dinfo = np.iinfo(np.uint8)
         frame_data = frame_data / float(dinfo.max - dinfo.min + 1)
 
